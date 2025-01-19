@@ -4663,6 +4663,26 @@ static void rtl8126_disable_double_vlan(struct rtl8126_private *tp)
                 break;
         }
 }
+// Start: ENABLE_TX_PAGE_REUSE
+
+// WARNING: This may have issues allocating such a large block of DMA memeory on some systems
+// NOTE: Sounds like the limit is somewhere between 128K to 4M?
+#define TX_LARGE_BUF_SIZE 2097152 // 2MiB
+
+static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
+        printk(KERN_WARNING "rt8126 - Using ENABLE_TX_PAGE_REUSE - Unofficial Tweak1 by Josh Kasten - dma_for_tx_buff_setup");
+        tp->tx_cur_addr_offset = 0;
+
+        // TOOD: Need to handle alloc errors yet
+        tp->tx_large_kmem = kmalloc(TX_LARGE_BUF_SIZE, GFP_KERNEL | GFP_DMA);
+        tp->tx_large_dma = dma_map_single(tp_to_dev(tp), tp->tx_large_kmem, TX_LARGE_BUF_SIZE, DMA_TO_DEVICE);
+}
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
+        dma_unmap_single(tp_to_dev(tp), tp->tx_large_dma, TX_LARGE_BUF_SIZE, DMA_TO_DEVICE);
+        kfree(tp->tx_large_kmem);
+}
+// End
 
 static void
 rtl8126_link_on_patch(struct net_device *dev)
@@ -14613,15 +14633,23 @@ rtl8126_init_one(struct pci_dev *pdev,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
                 tp->cp_cmd |= RxChkSum;
 #else
+// WARNING: Unofficial Tweak1 by Josh Kasten AKA ENABLE_TX_PAGE_REUSE
+                // JKasten - Removed NETIF_F_SG, AKA scatter-gather (NOTE: this probably turns off NETIF_F_TSO automatically)
+                //           from: dev->features, dev->hw_features, and dev->vlan_features
+                // Until xmit_frags can be updated to support ENABLE_TX_PAGE_REUSE
                 dev->features |= NETIF_F_RXCSUM;
                 switch (tp->mcfg) {
                 default:
-                        dev->features |= NETIF_F_SG | NETIF_F_TSO;
+                        dev->features |= NETIF_F_TSO;
                         break;
                 };
-                dev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
+                dev->hw_features = NETIF_F_IP_CSUM | NETIF_F_TSO |
                                    NETIF_F_RXCSUM | NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
-                dev->vlan_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
+
+                dev->hw_features =  NETIF_F_IP_CSUM | NETIF_F_TSO |
+                                NETIF_F_RXCSUM | NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
+
+                dev->vlan_features = NETIF_F_IP_CSUM | NETIF_F_TSO |
                                      NETIF_F_HIGHDMA;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,15,0)
                 dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
@@ -14984,6 +15012,8 @@ static void rtl8126_free_alloc_resources(struct rtl8126_private *tp)
         rtl8126_free_rx_desc(tp);
 
         rtl8126_free_tx_desc(tp);
+
+        rt8126_dma_for_tx_buff_unsetup(tp);
 }
 
 #ifdef ENABLE_USE_FIRMWARE_FILE
@@ -15034,6 +15064,10 @@ int rtl8126_open(struct net_device *dev)
         retval = rtl8126_init_ring(dev);
         if (retval < 0)
                 goto err_free_all_allocated_mem;
+
+        // Kasten - TODO: Fail or fall back if there is an error
+        // TODO2: Works here, but is this the best spot?
+        rt8126_dma_for_tx_buff_setup(tp);
 
         retval = rtl8126_alloc_irq(tp);
         if (retval < 0)
@@ -16037,10 +16071,6 @@ rtl8126_unmap_tx_skb(struct pci_dev *pdev,
                      struct ring_info *tx_skb,
                      struct TxDesc *desc)
 {
-        unsigned int len = tx_skb->len;
-
-        dma_unmap_single(&pdev->dev, le64_to_cpu(desc->addr), len, DMA_TO_DEVICE);
-
         desc->opts1 = cpu_to_le32(RTK_MAGIC_DEBUG_VALUE);
         desc->opts2 = 0x00;
         desc->addr = RTL8126_MAGIC_NUMBER;
@@ -16397,6 +16427,13 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
         const unsigned char nr_frags = info->nr_frags;
         unsigned long PktLenCnt = 0;
         bool LsoPatchEnabled = FALSE;
+
+        // TOOD: Need to make this work with SG on, I think this probably possible.
+        // Make sure NETIF_F_SG, AKA scatter-gather is OFF for now.
+        // If nr_frags > 0 than it is still on, and this will probably cuase a memory overflow
+        if (nr_frags > 0) {
+                 printk(KERN_ERR "r8126 - JKasten - ENABLE_TX_PAGE_REUSE does NOT support frags yet, this will cause issues!  nr_frags: %u", nr_frags);
+        }
 
         entry = ring->cur_tx;
         for (cur_frag = 0; cur_frag < nr_frags; cur_frag++) {
@@ -16867,12 +16904,25 @@ rtl8126_start_xmit(struct sk_buff *skb,
         }
 
         opts[0] = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
-        mapping = dma_map_single(tp_to_dev(tp), skb->data, len, DMA_TO_DEVICE);
-        if (unlikely(dma_mapping_error(tp_to_dev(tp), mapping))) {
-                if (unlikely(net_ratelimit()))
-                        netif_err(tp, drv, dev, "Failed to map TX DMA!\n");
-                goto err_dma_1;
+
+// WARNING: Unofficial Tweak1 by Josh Kasten
+// Start: ENABLE_TX_PAGE_REUSE
+        if (entry == 0) {
+                tp->tx_cur_addr_offset = 0;
         }
+
+        dma_addr_t cur_dma = tp->tx_large_dma + tp->tx_cur_addr_offset;
+        dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+        memcpy(tp->tx_large_kmem + tp->tx_cur_addr_offset,  skb->data, len);
+        dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+        
+        mapping = cur_dma;
+        
+        tp->tx_cur_addr_offset += len;
+
+        // Orignally it used an expensive dma_map_single call, PER PACKET!
+// End
+
 
 #ifdef ENABLE_PTP_SUPPORT
         if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
@@ -16943,8 +16993,6 @@ rtl8126_start_xmit(struct sk_buff *skb,
         }
 out:
         return ret;
-err_dma_1:
-        rtl8126_tx_clear_range(tp, ring, ring->cur_tx + 1, frags);
 err_dma_0:
         RTLDEV->stats.tx_dropped++;
         dev_kfree_skb_any(skb);

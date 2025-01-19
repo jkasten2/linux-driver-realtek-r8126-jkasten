@@ -2519,6 +2519,24 @@ struct rtl8126_private {
         unsigned rx_buf_page_size;
         u32 page_reuse_fail_cnt;
 #endif //ENABLE_PAGE_REUSE
+
+// WARNING: Unofficial Tweak1 by Josh Kasten
+// Start: ENABLE_TX_PAGE_REUSE
+// Description - Like ENABLE_PAGE_REUSE (which Realtek made for RX) this creates a single DMA block
+//   of memory to improve tx performance. This replaces the expenseive dma_map_single and dma_unmap_single
+//   per tx packet calls with dma_sync_single_for_cpu + memcpy + dma_sync_single_for_device. This means only
+// dma_map_single and dma_unmap_single is only called when the driver is started and stopped, instead of per-packet.
+// Note, the dma_unmap_single was called on an IRQ/Soft-IRQ when the NIC says the packet was sent.
+// WARNING: Only tested on x86 (with an Intel 8500t) on Linux Kernel 6.11.0-2-pve so far
+//     - However seen a ~17% increase in number of UDP 64 byte packets sent with iperf3 3.18, and ~2% less over all CPU
+// NOTE2: Frags also have to be disabled in this patch, which means sending jumbo frames aren't supported here.
+//    - It's probably possible to support in the future.
+        void* tx_large_kmem;
+        dma_addr_t tx_large_dma;
+         // How many bytes should be offset for writing to tx_large_kmem
+        unsigned int tx_cur_addr_offset;
+// End: ENABLE_TX_PAGE_REUSE
+
         u16 HwSuppNumTxQueues;
         u16 HwSuppNumRxQueues;
         unsigned int num_tx_rings;
