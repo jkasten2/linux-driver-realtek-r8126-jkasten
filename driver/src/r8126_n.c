@@ -296,6 +296,10 @@ static void rtl8126_link_timer(struct timer_list *t);
 #endif
 */
 
+static int rtl8126_add_tx_offset(struct rtl8126_private *tp,
+                                        unsigned int entry,
+                                        u32 len);
+
 static netdev_tx_t rtl8126_start_xmit(struct sk_buff *skb, struct net_device *dev);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
 static irqreturn_t rtl8126_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
@@ -4667,7 +4671,11 @@ static void rtl8126_disable_double_vlan(struct rtl8126_private *tp)
 
 // WARNING: This may have issues allocating such a large block of DMA memeory on some systems
 // NOTE: Sounds like the limit is somewhere between 128K to 4M?
-#define TX_LARGE_BUF_SIZE 2097152 // 2MiB
+// TEST: 4MiB overflowed a entry at 381 w/ 4MiB; And 8MiB fails to kmalloc(SIZE, GFP_KERNEL | GFP_DMA)
+// TODO: Kasten: Try out the Page Pool API
+//    - Link https://docs.kernel.org/networking/page_pool.html
+//    - Desscription - "The page_pool allocator is optimized for recycling page or page fragment used by skb packet and xdp frame."
+#define TX_LARGE_BUF_SIZE 4194304 // 4MiB
 
 static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
         printk(KERN_WARNING "rt8126 - Using ENABLE_TX_PAGE_REUSE - Unofficial Tweak1 by Josh Kasten - dma_for_tx_buff_setup");
@@ -14640,16 +14648,13 @@ rtl8126_init_one(struct pci_dev *pdev,
                 dev->features |= NETIF_F_RXCSUM;
                 switch (tp->mcfg) {
                 default:
-                        dev->features |= NETIF_F_TSO;
+                        dev->features |= NETIF_F_SG | NETIF_F_TSO;
                         break;
                 };
-                dev->hw_features = NETIF_F_IP_CSUM | NETIF_F_TSO |
+                dev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
                                    NETIF_F_RXCSUM | NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
 
-                dev->hw_features =  NETIF_F_IP_CSUM | NETIF_F_TSO |
-                                NETIF_F_RXCSUM | NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
-
-                dev->vlan_features = NETIF_F_IP_CSUM | NETIF_F_TSO |
+                dev->vlan_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
                                      NETIF_F_HIGHDMA;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,15,0)
                 dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
@@ -16428,13 +16433,6 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
         unsigned long PktLenCnt = 0;
         bool LsoPatchEnabled = FALSE;
 
-        // TOOD: Need to make this work with SG on, I think this probably possible.
-        // Make sure NETIF_F_SG, AKA scatter-gather is OFF for now.
-        // If nr_frags > 0 than it is still on, and this will probably cuase a memory overflow
-        if (nr_frags > 0) {
-                 printk(KERN_ERR "r8126 - JKasten - ENABLE_TX_PAGE_REUSE does NOT support frags yet, this will cause issues!  nr_frags: %u", nr_frags);
-        }
-
         entry = ring->cur_tx;
         for (cur_frag = 0; cur_frag < nr_frags; cur_frag++) {
                 skb_frag_t *frag = info->frags + cur_frag;
@@ -16452,14 +16450,15 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 len = skb_frag_size(frag);
                 addr = skb_frag_address(frag);
 #endif
-                mapping = dma_map_single(tp_to_dev(tp), addr, len, DMA_TO_DEVICE);
 
-                if (unlikely(dma_mapping_error(tp_to_dev(tp), mapping))) {
-                        if (unlikely(net_ratelimit()))
-                                netif_err(tp, drv, tp->dev,
-                                          "Failed to map TX fragments DMA!\n");
-                        goto err_out;
-                }
+                int offset = rtl8126_add_tx_offset(tp, entry, len);
+
+                dma_addr_t cur_dma = tp->tx_large_dma + offset;
+                dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+                memcpy(tp->tx_large_kmem + offset, addr, len);
+                // TODO: Perf: Kasten: Couldn't we just call dma_sync_single_for_device once?, when we write the header after this call. Memory is all packed together
+                dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE); 
+                mapping = cur_dma;
 
                 /* anti gcc 2.95.3 bugware (sic) */
                 status = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
@@ -16471,7 +16470,7 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 ring->tx_skb[entry].len = len;
 
                 txd->opts2 = cpu_to_le32(opts[1]);
-                wmb();
+                wmb(); // Perf: Kasten: Probably don't need to this, as we can flush when we write the header after this function is callled
                 txd->opts1 = cpu_to_le32(status);
 
                 PktLenCnt += len;
@@ -16834,6 +16833,31 @@ static void rtl8126_doorbell(struct rtl8126_private *tp,
                 RTL_W16(tp, TPPOLL_8125, BIT(ring->index));    /* set polling bit */
 }
 
+// Call everytime you need a new memory address to DMA copy into.
+//   * Don't modify tp->tx_cur_addr_offset directly, only expection being driver init / setup.
+// This will take care of wrap around.
+// TODO: Kasten: Since DMA space is limited, and could overflow, shouldn't we wrap around based on the len instead of the entry?
+//       Howver then the risk changes to overwriting a dirty tx, so we should see if that is posible to check here.
+//       Then if all that fails we should return 0, then update the callers logic to handle this case by count this as an error.
+static inline int rtl8126_add_tx_offset(struct rtl8126_private *tp,
+                                        unsigned int entry,
+                                        u32 len)
+{
+        if (entry == 0 ) {
+                tp->tx_cur_addr_offset = 0;
+        }
+        int offset = tp->tx_cur_addr_offset;
+        tp->tx_cur_addr_offset += len;
+
+        if (tp->tx_cur_addr_offset > TX_LARGE_BUF_SIZE * 0.9) {
+                printk(KERN_ERR
+                        "r8126 - TX DMA blockk might overflow, under 10 percent left!!!! tp->tx_cur_addr_offset: %u\n",
+                        tp->tx_cur_addr_offset);
+        }
+
+        return offset;
+}
+
 static netdev_tx_t
 rtl8126_start_xmit(struct sk_buff *skb,
                    struct net_device *dev)
@@ -16892,14 +16916,23 @@ rtl8126_start_xmit(struct sk_buff *skb,
         if (unlikely(!rtl8126_tso_csum(skb, dev, opts, &bytecount, &gso_segs)))
                 goto err_dma_0;
 
+
+        struct skb_shared_info *info = skb_shinfo(skb);
+        frags = info->nr_frags;
+        if (frags) {
+                len = skb_headlen(skb);
+        } else {
+                len = skb->len;
+        }
+        int offset = rtl8126_add_tx_offset(tp, entry, len);
+
         frags = rtl8126_xmit_frags(tp, ring, skb, opts);
         if (unlikely(frags < 0))
                 goto err_dma_0;
+        // TODO: Kasten: Can we not check frags twice in this function?
         if (frags) {
-                len = skb_headlen(skb);
                 opts[0] |= FirstFrag;
         } else {
-                len = skb->len;
                 opts[0] |= FirstFrag | LastFrag;
         }
 
@@ -16907,18 +16940,13 @@ rtl8126_start_xmit(struct sk_buff *skb,
 
 // WARNING: Unofficial Tweak1 by Josh Kasten
 // Start: ENABLE_TX_PAGE_REUSE
-        if (entry == 0) {
-                tp->tx_cur_addr_offset = 0;
-        }
 
-        dma_addr_t cur_dma = tp->tx_large_dma + tp->tx_cur_addr_offset;
+        dma_addr_t cur_dma = tp->tx_large_dma + offset;
         dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
-        memcpy(tp->tx_large_kmem + tp->tx_cur_addr_offset,  skb->data, len);
+        memcpy(tp->tx_large_kmem + offset,  skb->data, len);
         dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
         
         mapping = cur_dma;
-        
-        tp->tx_cur_addr_offset += len;
 
         // Orignally it used an expensive dma_map_single call, PER PACKET!
 // End

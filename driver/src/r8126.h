@@ -722,7 +722,9 @@ This is free software, and you are welcome to redistribute it under certain cond
 
 #define rtl8126_rx_page_size(order) (PAGE_SIZE << order)
 
-#define MAX_NUM_TX_DESC 1024    /* Maximum number of Tx descriptor registers */
+// KASTEN - Limit size due to large continuous DMA block needed for performance.
+//          TODO: This limitation can most likely be lifted after some code changes.
+#define MAX_NUM_TX_DESC 256     /* Maximum number of Tx descriptor registers */
 #define MAX_NUM_RX_DESC 1024    /* Maximum number of Rx descriptor registers */
 
 #define MIN_NUM_TX_DESC 256    /* Minimum number of Tx descriptor registers */
