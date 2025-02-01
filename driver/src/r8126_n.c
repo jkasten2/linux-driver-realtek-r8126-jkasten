@@ -4663,6 +4663,81 @@ static void rtl8126_disable_double_vlan(struct rtl8126_private *tp)
                 break;
         }
 }
+// Start: ENABLE_TX_PAGE_REUSE
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp);
+
+// TODO: Kasten: Try out the Page Pool API
+//    - Link https://docs.kernel.org/networking/page_pool.html
+//    - Desscription - "The page_pool allocator is optimized for recycling page or page fragment used by skb packet and xdp frame."
+
+// The amount of RAM used will be tx ring size times the number of tx rings. 64MiB by default.
+// TODO: What is the max skb for skb_frag_size or skb->data?
+#define TX_PER_PACKET_BUFFER_SIZE 65536 // 64KiB
+
+static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
+        printk(KERN_WARNING "rt8126 - Using ENABLE_TX_PAGE_REUSE - Unofficial Tweak1 by Josh Kasten - dma_for_tx_buff_setup");
+
+        printk(KERN_WARNING "rt8126 - tp->tx_ring[0].num_tx_desc: %u", tp->tx_ring[0].num_tx_desc);
+
+        // // TODO: Account for more than 1 ring
+        int tx_ring_size = tp->tx_ring[0].num_tx_desc;
+        printk(KERN_WARNING "rt8126 - sizeof(void*) * tx_ring_size: %u", sizeof(void*) * tx_ring_size);
+
+        tp->tx_ring[0].tx_kmem_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
+        tp->tx_ring[0].tx_dma_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
+
+        bool got_err = false;
+        for(unsigned int i = 0; i < tx_ring_size; i++) {
+                tp->tx_ring[0].tx_kmem_buffers[i] = kmalloc(TX_PER_PACKET_BUFFER_SIZE, GFP_KERNEL);
+                if (tp->tx_ring[0].tx_kmem_buffers[i] == 0) {
+                        printk(KERN_WARNING "rt8126 - kmalloc falled!");
+                        got_err = true;
+                        break;
+                } else {
+                        dma_addr_t dma_addr = dma_map_single(tp_to_dev(tp), tp->tx_ring[0].tx_kmem_buffers[i], TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
+                        tp->tx_ring[0].tx_dma_buffers[i] = dma_addr;
+
+                        if (dma_addr == 0) {
+                                printk(KERN_ERR "dma_addr is 0");
+                                int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
+                                printk(KERN_ERR "rt8126 - dma_error: %u", dma_error);
+                                got_err = true;
+                                break;
+                        } else {
+                                int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
+                                if (dma_error != 0) {
+                                        printk(KERN_ERR "rt8126 - dma_error: %u", dma_error);
+                                        got_err = true;
+                                        break;
+                                }
+                        }
+                }
+        }
+
+        if (got_err) {
+                // TODO: Test code path
+                rt8126_dma_for_tx_buff_unsetup(tp);
+        }
+        else {
+                printk(KERN_WARNING "rt8126 - rt8126_dma_for_tx_buff_setup - success");
+        }
+}
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
+        for(unsigned int i = 0; i < tp->tx_ring[0].num_tx_desc; i++) {
+                dma_addr_t cur_dma = tp->tx_ring[0].tx_dma_buffers[i];
+                if (cur_dma != 0) {
+                        dma_unmap_single(tp_to_dev(tp), cur_dma, TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
+                }
+                kfree(tp->tx_ring[0].tx_kmem_buffers[i]);
+        }
+        kfree(tp->tx_ring[0].tx_kmem_buffers);
+        kfree(tp->tx_ring[0].tx_dma_buffers);
+
+        printk(KERN_WARNING "rt8126 - rt8126_dma_for_tx_buff_unsetup - success");
+}
+// End
 
 static void
 rtl8126_link_on_patch(struct net_device *dev)
@@ -6566,8 +6641,8 @@ static void rtl8126_get_ringparam(struct net_device *dev,
 {
         struct rtl8126_private *tp = netdev_priv(dev);
 
-        ring->rx_max_pending = MAX_NUM_TX_DESC;
-        ring->tx_max_pending = MAX_NUM_RX_DESC;
+        ring->tx_max_pending = MAX_NUM_TX_DESC;
+        ring->rx_max_pending = MAX_NUM_RX_DESC;
         ring->rx_pending = tp->rx_ring[0].num_rx_desc;
         ring->tx_pending = tp->tx_ring[0].num_tx_desc;
 }
@@ -14613,6 +14688,10 @@ rtl8126_init_one(struct pci_dev *pdev,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
                 tp->cp_cmd |= RxChkSum;
 #else
+// WARNING: Unofficial Tweak1 by Josh Kasten AKA ENABLE_TX_PAGE_REUSE
+                // JKasten - Removed NETIF_F_SG, AKA scatter-gather (NOTE: this probably turns off NETIF_F_TSO automatically)
+                //           from: dev->features, dev->hw_features, and dev->vlan_features
+                // Until xmit_frags can be updated to support ENABLE_TX_PAGE_REUSE
                 dev->features |= NETIF_F_RXCSUM;
                 switch (tp->mcfg) {
                 default:
@@ -14621,6 +14700,7 @@ rtl8126_init_one(struct pci_dev *pdev,
                 };
                 dev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
                                    NETIF_F_RXCSUM | NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
+
                 dev->vlan_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
                                      NETIF_F_HIGHDMA;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,15,0)
@@ -14984,6 +15064,8 @@ static void rtl8126_free_alloc_resources(struct rtl8126_private *tp)
         rtl8126_free_rx_desc(tp);
 
         rtl8126_free_tx_desc(tp);
+
+        rt8126_dma_for_tx_buff_unsetup(tp);
 }
 
 #ifdef ENABLE_USE_FIRMWARE_FILE
@@ -15034,6 +15116,10 @@ int rtl8126_open(struct net_device *dev)
         retval = rtl8126_init_ring(dev);
         if (retval < 0)
                 goto err_free_all_allocated_mem;
+
+        // Kasten - TODO: Fail or fall back if there is an error
+        // TODO2: Works here, but is this the best spot?
+        rt8126_dma_for_tx_buff_setup(tp);
 
         retval = rtl8126_alloc_irq(tp);
         if (retval < 0)
@@ -16037,10 +16123,6 @@ rtl8126_unmap_tx_skb(struct pci_dev *pdev,
                      struct ring_info *tx_skb,
                      struct TxDesc *desc)
 {
-        unsigned int len = tx_skb->len;
-
-        dma_unmap_single(&pdev->dev, le64_to_cpu(desc->addr), len, DMA_TO_DEVICE);
-
         desc->opts1 = cpu_to_le32(RTK_MAGIC_DEBUG_VALUE);
         desc->opts2 = 0x00;
         desc->addr = RTL8126_MAGIC_NUMBER;
@@ -16309,6 +16391,11 @@ static void rtl8126_esd_task(void *_data)
         struct net_device *dev = _data;
         struct rtl8126_private *tp = netdev_priv(dev);
 #else
+// TOOD: Kasten: Random hard system locks:
+// Ever since the change was made to use pre-allocated DMA polls for TX seeing dmesg entries like this:
+// workqueue: rtl8126_esd_task [r8126] hogged CPU for >10000us 259 times, consider switching to WQ_UNBOUND
+// After seeing a number of these the system locks up randomly when idle.
+// This message has been showing since the first commit of adding ENABLE_TX_PAGE_REUSE
 static void rtl8126_esd_task(struct work_struct *work)
 {
         struct rtl8126_private *tp =
@@ -16415,14 +16502,13 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 len = skb_frag_size(frag);
                 addr = skb_frag_address(frag);
 #endif
-                mapping = dma_map_single(tp_to_dev(tp), addr, len, DMA_TO_DEVICE);
 
-                if (unlikely(dma_mapping_error(tp_to_dev(tp), mapping))) {
-                        if (unlikely(net_ratelimit()))
-                                netif_err(tp, drv, tp->dev,
-                                          "Failed to map TX fragments DMA!\n");
-                        goto err_out;
-                }
+                dma_addr_t cur_dma = ring->tx_dma_buffers[entry];
+
+                dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+                memcpy(ring->tx_kmem_buffers[entry], addr, len);
+                dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+                mapping = cur_dma;
 
                 /* anti gcc 2.95.3 bugware (sic) */
                 status = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
@@ -16434,7 +16520,7 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 ring->tx_skb[entry].len = len;
 
                 txd->opts2 = cpu_to_le32(opts[1]);
-                wmb();
+                wmb(); // Perf: Kasten: Probably don't need to this, as we can flush when we write the header after this function is callled
                 txd->opts1 = cpu_to_le32(status);
 
                 PktLenCnt += len;
@@ -16822,6 +16908,13 @@ rtl8126_start_xmit(struct sk_buff *skb,
 
         ring = &tp->tx_ring[queue_mapping];
 
+        // unsigned int slots_avail = READ_ONCE(ring->dirty_tx) + ring->num_tx_desc
+        //                                 - READ_ONCE(ring->cur_tx);
+
+        // if (slots_avail < 50) {
+        //         printk(KERN_WARNING "r8216 - Kasten - slots_avail < 50: %u\n", slots_avail);
+        // }
+
         if (unlikely(!rtl8126_tx_slots_avail(tp, ring))) {
                 if (netif_msg_drv(tp)) {
                         printk(KERN_ERR
@@ -16855,24 +16948,41 @@ rtl8126_start_xmit(struct sk_buff *skb,
         if (unlikely(!rtl8126_tso_csum(skb, dev, opts, &bytecount, &gso_segs)))
                 goto err_dma_0;
 
+
+        struct skb_shared_info *info = skb_shinfo(skb);
+        frags = info->nr_frags;
+        if (frags) {
+                len = skb_headlen(skb);
+        } else {
+                len = skb->len;
+        }
+
         frags = rtl8126_xmit_frags(tp, ring, skb, opts);
         if (unlikely(frags < 0))
                 goto err_dma_0;
+        // TODO: Kasten: Can we not check frags twice in this function?
         if (frags) {
-                len = skb_headlen(skb);
                 opts[0] |= FirstFrag;
         } else {
-                len = skb->len;
                 opts[0] |= FirstFrag | LastFrag;
         }
 
         opts[0] = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
-        mapping = dma_map_single(tp_to_dev(tp), skb->data, len, DMA_TO_DEVICE);
-        if (unlikely(dma_mapping_error(tp_to_dev(tp), mapping))) {
-                if (unlikely(net_ratelimit()))
-                        netif_err(tp, drv, dev, "Failed to map TX DMA!\n");
-                goto err_dma_1;
-        }
+
+// WARNING: Unofficial Tweak1 by Josh Kasten
+// Start: ENABLE_TX_PAGE_REUSE
+
+        dma_addr_t cur_dma = ring->tx_dma_buffers[entry];
+
+        dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+        memcpy(ring->tx_kmem_buffers[entry], skb->data, len);
+        dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+        
+        mapping = cur_dma;
+
+        // Orignally it used an expensive dma_map_single call, PER PACKET!
+// End
+
 
 #ifdef ENABLE_PTP_SUPPORT
         if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
@@ -16943,8 +17053,6 @@ rtl8126_start_xmit(struct sk_buff *skb,
         }
 out:
         return ret;
-err_dma_1:
-        rtl8126_tx_clear_range(tp, ring, ring->cur_tx + 1, frags);
 err_dma_0:
         RTLDEV->stats.tx_dropped++;
         dev_kfree_skb_any(skb);
