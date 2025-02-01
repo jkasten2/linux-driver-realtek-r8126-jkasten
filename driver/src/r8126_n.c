@@ -4687,22 +4687,17 @@ static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
         tp->tx_ring[0].tx_kmem_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
         tp->tx_ring[0].tx_dma_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
 
-        unsigned int current_offset;
-        void** cur_kmem;
-        dma_addr_t* cur_dma;
         bool got_err = false;
         for(unsigned int i = 0; i < tx_ring_size; i++) {
-                current_offset = i * sizeof(void*);
-                cur_kmem = tp->tx_ring[0].tx_kmem_buffers + current_offset;
-                *cur_kmem = kmalloc(65536, GFP_KERNEL);
-                if (*cur_kmem == 0) {
+                tp->tx_ring[0].tx_kmem_buffers[i] = kmalloc(TX_PER_PACKET_BUFFER_SIZE, GFP_KERNEL);
+                if (tp->tx_ring[0].tx_kmem_buffers[i] == 0) {
                         printk(KERN_WARNING "rt8126 - kmalloc falled!");
                         got_err = true;
                         break;
                 } else {
-                        dma_addr_t dma_addr = dma_map_single(tp_to_dev(tp), *cur_kmem, 65536, DMA_TO_DEVICE);
-                        cur_dma = tp->tx_ring[0].tx_dma_buffers + current_offset;
-                        *cur_dma = dma_addr;
+                        dma_addr_t dma_addr = dma_map_single(tp_to_dev(tp), tp->tx_ring[0].tx_kmem_buffers[i], TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
+                        tp->tx_ring[0].tx_dma_buffers[i] = dma_addr;
+
                         if (dma_addr == 0) {
                                 printk(KERN_ERR "dma_addr is 0");
                                 int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
@@ -4730,18 +4725,12 @@ static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
 }
 
 static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
-        int tx_ring_size = tp->tx_ring[0].num_tx_desc;
-        unsigned int current_offset;
-        void** cur_kmem;
-        for(unsigned int i = 0; i < tx_ring_size; i++) {
-                current_offset = i * sizeof(void*);
-                cur_kmem = tp->tx_ring[0].tx_kmem_buffers + current_offset;
-                void** cur_dma = tp->tx_ring[0].tx_dma_buffers + current_offset;
-                if (*cur_dma != 0) {
-                        dma_addr_t dma_addr = (dma_addr_t)*cur_dma;
-                        dma_unmap_single(tp_to_dev(tp), dma_addr, 65536, DMA_TO_DEVICE);
+        for(unsigned int i = 0; i < tp->tx_ring[0].num_tx_desc; i++) {
+                dma_addr_t cur_dma = tp->tx_ring[0].tx_dma_buffers[i];
+                if (cur_dma != 0) {
+                        dma_unmap_single(tp_to_dev(tp), cur_dma, TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
                 }
-                kfree(*cur_kmem);
+                kfree(tp->tx_ring[0].tx_kmem_buffers[i]);
         }
         kfree(tp->tx_ring[0].tx_kmem_buffers);
         kfree(tp->tx_ring[0].tx_dma_buffers);
@@ -16514,12 +16503,10 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 addr = skb_frag_address(frag);
 #endif
 
-                void** tx_dma_buffer_addr = ring->tx_dma_buffers + (entry * sizeof(void*));
-                dma_addr_t cur_dma = (dma_addr_t)*tx_dma_buffer_addr;
-                void** tx_kmem_buffer_addr = ring->tx_kmem_buffers + (entry * sizeof(void*));
+                dma_addr_t cur_dma = ring->tx_dma_buffers[entry];
 
                 dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
-                memcpy(*tx_kmem_buffer_addr, addr, len);
+                memcpy(ring->tx_kmem_buffers[entry], addr, len);
                 dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
                 mapping = cur_dma;
 
@@ -16985,12 +16972,10 @@ rtl8126_start_xmit(struct sk_buff *skb,
 // WARNING: Unofficial Tweak1 by Josh Kasten
 // Start: ENABLE_TX_PAGE_REUSE
 
-        void** tx_dma_buffer_addr = ring->tx_dma_buffers + (entry * sizeof(void*));
-        dma_addr_t cur_dma = (dma_addr_t)*tx_dma_buffer_addr;
+        dma_addr_t cur_dma = ring->tx_dma_buffers[entry];
 
         dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
-        void** tx_kmem_buffer_addr = ring->tx_kmem_buffers + (entry * sizeof(void*));
-        memcpy(*tx_kmem_buffer_addr, skb->data, len);
+        memcpy(ring->tx_kmem_buffers[entry], skb->data, len);
         dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
         
         mapping = cur_dma;

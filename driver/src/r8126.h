@@ -2198,8 +2198,8 @@ struct rtl8126_tx_ring {
 
 // WARNING: Unofficial Tweak1 by Josh Kasten
 // Start: ENABLE_TX_PAGE_REUSE
-        void* tx_kmem_buffers;
-        void* tx_dma_buffers; // TOOD: this type is really dma_addr_t*, AKA an arrary of dma_addr_t
+        void** tx_kmem_buffers;
+        dma_addr_t* tx_dma_buffers;
 // End: ENABLE_TX_PAGE_REUSE
 };
 
