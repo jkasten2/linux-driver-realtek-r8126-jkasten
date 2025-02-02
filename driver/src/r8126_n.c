@@ -14684,10 +14684,6 @@ rtl8126_init_one(struct pci_dev *pdev,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
                 tp->cp_cmd |= RxChkSum;
 #else
-// WARNING: Unofficial Tweak1 by Josh Kasten AKA ENABLE_TX_PAGE_REUSE
-                // JKasten - Removed NETIF_F_SG, AKA scatter-gather (NOTE: this probably turns off NETIF_F_TSO automatically)
-                //           from: dev->features, dev->hw_features, and dev->vlan_features
-                // Until xmit_frags can be updated to support ENABLE_TX_PAGE_REUSE
                 dev->features |= NETIF_F_RXCSUM;
                 switch (tp->mcfg) {
                 default:
@@ -14696,7 +14692,6 @@ rtl8126_init_one(struct pci_dev *pdev,
                 };
                 dev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
                                    NETIF_F_RXCSUM | NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
-
                 dev->vlan_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_TSO |
                                      NETIF_F_HIGHDMA;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,15,0)
@@ -16387,11 +16382,6 @@ static void rtl8126_esd_task(void *_data)
         struct net_device *dev = _data;
         struct rtl8126_private *tp = netdev_priv(dev);
 #else
-// TOOD: Kasten: Random hard system locks:
-// Ever since the change was made to use pre-allocated DMA polls for TX seeing dmesg entries like this:
-// workqueue: rtl8126_esd_task [r8126] hogged CPU for >10000us 259 times, consider switching to WQ_UNBOUND
-// After seeing a number of these the system locks up randomly when idle.
-// This message has been showing since the first commit of adding ENABLE_TX_PAGE_REUSE
 static void rtl8126_esd_task(struct work_struct *work)
 {
         struct rtl8126_private *tp =
@@ -16499,12 +16489,11 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 addr = skb_frag_address(frag);
 #endif
 
-                dma_addr_t cur_dma = ring->tx_dma_buffers[entry];
+                mapping = ring->tx_dma_buffers[entry];
 
-                dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+                dma_sync_single_for_cpu(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
                 memcpy(ring->tx_kmem_buffers[entry], addr, len);
-                dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
-                mapping = cur_dma;
+                dma_sync_single_for_device(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
 
                 /* anti gcc 2.95.3 bugware (sic) */
                 status = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
@@ -16904,13 +16893,6 @@ rtl8126_start_xmit(struct sk_buff *skb,
 
         ring = &tp->tx_ring[queue_mapping];
 
-        // unsigned int slots_avail = READ_ONCE(ring->dirty_tx) + ring->num_tx_desc
-        //                                 - READ_ONCE(ring->cur_tx);
-
-        // if (slots_avail < 50) {
-        //         printk(KERN_WARNING "r8216 - Kasten - slots_avail < 50: %u\n", slots_avail);
-        // }
-
         if (unlikely(!rtl8126_tx_slots_avail(tp, ring))) {
                 if (netif_msg_drv(tp)) {
                         printk(KERN_ERR
@@ -16946,20 +16928,14 @@ rtl8126_start_xmit(struct sk_buff *skb,
 
 
         struct skb_shared_info *info = skb_shinfo(skb);
-        frags = info->nr_frags;
-        if (frags) {
-                len = skb_headlen(skb);
-        } else {
-                len = skb->len;
-        }
-
         frags = rtl8126_xmit_frags(tp, ring, skb, opts);
         if (unlikely(frags < 0))
                 goto err_dma_0;
-        // TODO: Kasten: Can we not check frags twice in this function?
         if (frags) {
+                len = skb_headlen(skb);
                 opts[0] |= FirstFrag;
         } else {
+                len = skb->len;
                 opts[0] |= FirstFrag | LastFrag;
         }
 
@@ -16967,14 +16943,11 @@ rtl8126_start_xmit(struct sk_buff *skb,
 
 // WARNING: Unofficial Tweak1 by Josh Kasten
 // Start: ENABLE_TX_PAGE_REUSE
+        mapping = ring->tx_dma_buffers[entry];
 
-        dma_addr_t cur_dma = ring->tx_dma_buffers[entry];
-
-        dma_sync_single_for_cpu(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
+        dma_sync_single_for_cpu(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
         memcpy(ring->tx_kmem_buffers[entry], skb->data, len);
-        dma_sync_single_for_device(tp_to_dev(tp), cur_dma, len, DMA_TO_DEVICE);
-        
-        mapping = cur_dma;
+        dma_sync_single_for_device(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
 
         // Orignally it used an expensive dma_map_single call, PER PACKET!
 // End
