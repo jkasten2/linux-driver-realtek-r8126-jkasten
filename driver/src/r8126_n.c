@@ -4680,23 +4680,23 @@ static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
 
         printk(KERN_WARNING "rt8126 - tp->tx_ring[0].num_tx_desc: %u", tp->tx_ring[0].num_tx_desc);
 
-        // // TODO: Account for more than 1 ring
-        int tx_ring_size = tp->tx_ring[0].num_tx_desc;
+        for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
+                int tx_ring_size = tp->tx_ring[ring_num].num_tx_desc;
         printk(KERN_WARNING "rt8126 - sizeof(void*) * tx_ring_size: %u", sizeof(void*) * tx_ring_size);
 
-        tp->tx_ring[0].tx_kmem_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
-        tp->tx_ring[0].tx_dma_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
+                tp->tx_ring[ring_num].tx_kmem_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
+                tp->tx_ring[ring_num].tx_dma_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
 
         bool got_err = false;
         for(unsigned int i = 0; i < tx_ring_size; i++) {
-                tp->tx_ring[0].tx_kmem_buffers[i] = kmalloc(TX_PER_PACKET_BUFFER_SIZE, GFP_KERNEL);
-                if (tp->tx_ring[0].tx_kmem_buffers[i] == 0) {
+                        tp->tx_ring[ring_num].tx_kmem_buffers[i] = kmalloc(TX_PER_PACKET_BUFFER_SIZE, GFP_KERNEL);
+                        if (tp->tx_ring[ring_num].tx_kmem_buffers[i] == 0) {
                         printk(KERN_WARNING "rt8126 - kmalloc falled!");
                         got_err = true;
                         break;
                 } else {
-                        dma_addr_t dma_addr = dma_map_single(tp_to_dev(tp), tp->tx_ring[0].tx_kmem_buffers[i], TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
-                        tp->tx_ring[0].tx_dma_buffers[i] = dma_addr;
+                                dma_addr_t dma_addr = dma_map_single(tp_to_dev(tp), tp->tx_ring[ring_num].tx_kmem_buffers[i], TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
+                                tp->tx_ring[ring_num].tx_dma_buffers[i] = dma_addr;
 
                         if (dma_addr == 0) {
                                 printk(KERN_ERR "dma_addr is 0");
@@ -4721,19 +4721,22 @@ static void rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
         }
         else {
                 printk(KERN_WARNING "rt8126 - rt8126_dma_for_tx_buff_setup - success");
+                }
         }
 }
 
 static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
-        for(unsigned int i = 0; i < tp->tx_ring[0].num_tx_desc; i++) {
-                dma_addr_t cur_dma = tp->tx_ring[0].tx_dma_buffers[i];
+        for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
+                for(unsigned int i = 0; i < tp->tx_ring[ring_num].num_tx_desc; i++) {
+                        dma_addr_t cur_dma = tp->tx_ring[ring_num].tx_dma_buffers[i];
                 if (cur_dma != 0) {
                         dma_unmap_single(tp_to_dev(tp), cur_dma, TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
                 }
-                kfree(tp->tx_ring[0].tx_kmem_buffers[i]);
+                        kfree(tp->tx_ring[ring_num].tx_kmem_buffers[i]);
         }
-        kfree(tp->tx_ring[0].tx_kmem_buffers);
-        kfree(tp->tx_ring[0].tx_dma_buffers);
+                kfree(tp->tx_ring[ring_num].tx_kmem_buffers);
+                kfree(tp->tx_ring[ring_num].tx_dma_buffers);
+        }
 
         printk(KERN_WARNING "rt8126 - rt8126_dma_for_tx_buff_unsetup - success");
 }
