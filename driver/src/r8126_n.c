@@ -4680,8 +4680,6 @@ static int rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
 
         for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
                 int tx_ring_size = tp->tx_ring[ring_num].num_tx_desc;
-                printk(KERN_INFO "rt8126 - sizeof(void*) * tx_ring_size: %u", sizeof(void*) * tx_ring_size);
-
                 tp->tx_ring[ring_num].tx_kmem_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
                 tp->tx_ring[ring_num].tx_dma_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
 
@@ -4698,13 +4696,13 @@ static int rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
                         if (dma_addr == 0) {
                                         printk(KERN_ERR "rt8126 - dma_addr is 0");
                                 int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
-                                printk(KERN_ERR "rt8126 - dma_error: %u", dma_error);
+                                        printk(KERN_ERR "rt8126 - dma_error: %d", dma_error);
                                         return -1;
                                 break;
                         } else {
                                 int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
                                 if (dma_error != 0) {
-                                        printk(KERN_ERR "rt8126 - dma_error: %u", dma_error);
+                                                printk(KERN_ERR "rt8126 - dma_error: %d", dma_error);
                                                 return -1;
                                         break;
                                 }
@@ -16511,10 +16509,6 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
         }
 
         return cur_frag;
-
-err_out:
-        rtl8126_tx_clear_range(tp, ring, ring->cur_tx + 1, cur_frag);
-        return -EIO;
 }
 
 static inline
@@ -16925,8 +16919,6 @@ rtl8126_start_xmit(struct sk_buff *skb,
         if (unlikely(!rtl8126_tso_csum(skb, dev, opts, &bytecount, &gso_segs)))
                 goto err_dma_0;
 
-
-        struct skb_shared_info *info = skb_shinfo(skb);
         frags = rtl8126_xmit_frags(tp, ring, skb, opts);
         if (unlikely(frags < 0))
                 goto err_dma_0;
