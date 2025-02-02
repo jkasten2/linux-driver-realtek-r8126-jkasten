@@ -4663,6 +4663,75 @@ static void rtl8126_disable_double_vlan(struct rtl8126_private *tp)
                 break;
         }
 }
+// Start: ENABLE_TX_PAGE_REUSE
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp);
+
+// TODO: Kasten: Try out the Page Pool API
+//    - Link https://docs.kernel.org/networking/page_pool.html
+//    - Desscription - "The page_pool allocator is optimized for recycling page or page fragment used by skb packet and xdp frame."
+
+// The amount of RAM used will be tx ring size times the number of tx rings. 64MiB by default.
+// TODO: What is the max skb for skb_frag_size or skb->data?
+#define TX_PER_PACKET_BUFFER_SIZE 65536 // 64KiB
+
+static int rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
+        printk(KERN_INFO "rt8126 - Using ENABLE_TX_PAGE_REUSE - Unofficial Tweak1 by Josh Kasten - dma_for_tx_buff_setup");
+
+        for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
+                int tx_ring_size = tp->tx_ring[ring_num].num_tx_desc;
+                tp->tx_ring[ring_num].tx_kmem_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
+                tp->tx_ring[ring_num].tx_dma_buffers = kzalloc(sizeof(void*) * tx_ring_size, GFP_KERNEL);
+
+                for(int i = 0; i < tx_ring_size; i++) {
+                        tp->tx_ring[ring_num].tx_kmem_buffers[i] = kmalloc(TX_PER_PACKET_BUFFER_SIZE, GFP_KERNEL);
+                        if (tp->tx_ring[ring_num].tx_kmem_buffers[i] == 0) {
+                                printk(KERN_ERR "rt8126 - kmalloc falled!");
+                                return -1;
+                        break;
+                } else {
+                                dma_addr_t dma_addr = dma_map_single(tp_to_dev(tp), tp->tx_ring[ring_num].tx_kmem_buffers[i], TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
+                                tp->tx_ring[ring_num].tx_dma_buffers[i] = dma_addr;
+
+                        if (dma_addr == 0) {
+                                        printk(KERN_ERR "rt8126 - dma_addr is 0");
+                                int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
+                                        printk(KERN_ERR "rt8126 - dma_error: %d", dma_error);
+                                        return -1;
+                                break;
+                        } else {
+                                int dma_error = dma_mapping_error(tp_to_dev(tp), dma_addr);
+                                if (dma_error != 0) {
+                                                printk(KERN_ERR "rt8126 - dma_error: %d", dma_error);
+                                                return -1;
+                                        break;
+                                }
+                        }
+                }
+        }
+        }
+
+        printk(KERN_INFO "rt8126 - rt8126_dma_for_tx_buff_setup - success");
+        return 1;
+}
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
+        for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
+                for(int i = 0; i < tp->tx_ring[ring_num].num_tx_desc; i++) {
+                        dma_addr_t cur_dma = tp->tx_ring[ring_num].tx_dma_buffers[i];
+                        if (cur_dma != 0)
+                        dma_unmap_single(tp_to_dev(tp), cur_dma, TX_PER_PACKET_BUFFER_SIZE, DMA_TO_DEVICE);
+                        void* kmem = tp->tx_ring[ring_num].tx_kmem_buffers[i];
+                        if (kmem != 0)
+                                kfree(kmem);
+        }
+                kfree(tp->tx_ring[ring_num].tx_kmem_buffers);
+                kfree(tp->tx_ring[ring_num].tx_dma_buffers);
+        }
+
+        printk(KERN_INFO "rt8126 - rt8126_dma_for_tx_buff_unsetup - success");
+}
+// End
 
 static void
 rtl8126_link_on_patch(struct net_device *dev)
@@ -6566,8 +6635,8 @@ static void rtl8126_get_ringparam(struct net_device *dev,
 {
         struct rtl8126_private *tp = netdev_priv(dev);
 
-        ring->rx_max_pending = MAX_NUM_TX_DESC;
-        ring->tx_max_pending = MAX_NUM_RX_DESC;
+        ring->tx_max_pending = MAX_NUM_TX_DESC;
+        ring->rx_max_pending = MAX_NUM_RX_DESC;
         ring->rx_pending = tp->rx_ring[0].num_rx_desc;
         ring->tx_pending = tp->tx_ring[0].num_tx_desc;
 }
@@ -14984,6 +15053,8 @@ static void rtl8126_free_alloc_resources(struct rtl8126_private *tp)
         rtl8126_free_rx_desc(tp);
 
         rtl8126_free_tx_desc(tp);
+
+        rt8126_dma_for_tx_buff_unsetup(tp);
 }
 
 #ifdef ENABLE_USE_FIRMWARE_FILE
@@ -15034,6 +15105,10 @@ int rtl8126_open(struct net_device *dev)
         retval = rtl8126_init_ring(dev);
         if (retval < 0)
                 goto err_free_all_allocated_mem;
+
+        retval = rt8126_dma_for_tx_buff_setup(tp);
+        if (retval < 0)
+                 goto err_free_all_allocated_mem;
 
         retval = rtl8126_alloc_irq(tp);
         if (retval < 0)
@@ -16037,10 +16112,6 @@ rtl8126_unmap_tx_skb(struct pci_dev *pdev,
                      struct ring_info *tx_skb,
                      struct TxDesc *desc)
 {
-        unsigned int len = tx_skb->len;
-
-        dma_unmap_single(&pdev->dev, le64_to_cpu(desc->addr), len, DMA_TO_DEVICE);
-
         desc->opts1 = cpu_to_le32(RTK_MAGIC_DEBUG_VALUE);
         desc->opts2 = 0x00;
         desc->addr = RTL8126_MAGIC_NUMBER;
@@ -16415,14 +16486,12 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 len = skb_frag_size(frag);
                 addr = skb_frag_address(frag);
 #endif
-                mapping = dma_map_single(tp_to_dev(tp), addr, len, DMA_TO_DEVICE);
 
-                if (unlikely(dma_mapping_error(tp_to_dev(tp), mapping))) {
-                        if (unlikely(net_ratelimit()))
-                                netif_err(tp, drv, tp->dev,
-                                          "Failed to map TX fragments DMA!\n");
-                        goto err_out;
-                }
+                mapping = ring->tx_dma_buffers[entry];
+
+                dma_sync_single_for_cpu(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
+                memcpy(ring->tx_kmem_buffers[entry], addr, len);
+                dma_sync_single_for_device(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
 
                 /* anti gcc 2.95.3 bugware (sic) */
                 status = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
@@ -16434,17 +16503,12 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 ring->tx_skb[entry].len = len;
 
                 txd->opts2 = cpu_to_le32(opts[1]);
-                wmb();
                 txd->opts1 = cpu_to_le32(status);
 
                 PktLenCnt += len;
         }
 
         return cur_frag;
-
-err_out:
-        rtl8126_tx_clear_range(tp, ring, ring->cur_tx + 1, cur_frag);
-        return -EIO;
 }
 
 static inline
@@ -16867,12 +16931,18 @@ rtl8126_start_xmit(struct sk_buff *skb,
         }
 
         opts[0] = rtl8126_get_txd_opts1(ring, opts[0], len, entry);
-        mapping = dma_map_single(tp_to_dev(tp), skb->data, len, DMA_TO_DEVICE);
-        if (unlikely(dma_mapping_error(tp_to_dev(tp), mapping))) {
-                if (unlikely(net_ratelimit()))
-                        netif_err(tp, drv, dev, "Failed to map TX DMA!\n");
-                goto err_dma_1;
-        }
+
+// WARNING: Unofficial Tweak1 by Josh Kasten
+// Start: ENABLE_TX_PAGE_REUSE
+        mapping = ring->tx_dma_buffers[entry];
+
+        dma_sync_single_for_cpu(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
+        memcpy(ring->tx_kmem_buffers[entry], skb->data, len);
+        dma_sync_single_for_device(tp_to_dev(tp), mapping, len, DMA_TO_DEVICE);
+
+        // Orignally it used an expensive dma_map_single call, PER PACKET!
+// End
+
 
 #ifdef ENABLE_PTP_SUPPORT
         if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
@@ -16943,8 +17013,6 @@ rtl8126_start_xmit(struct sk_buff *skb,
         }
 out:
         return ret;
-err_dma_1:
-        rtl8126_tx_clear_range(tp, ring, ring->cur_tx + 1, frags);
 err_dma_0:
         RTLDEV->stats.tx_dropped++;
         dev_kfree_skb_any(skb);

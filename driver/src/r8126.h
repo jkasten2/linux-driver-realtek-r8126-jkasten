@@ -722,7 +722,7 @@ This is free software, and you are welcome to redistribute it under certain cond
 
 #define rtl8126_rx_page_size(order) (PAGE_SIZE << order)
 
-#define MAX_NUM_TX_DESC 1024    /* Maximum number of Tx descriptor registers */
+#define MAX_NUM_TX_DESC 1024     /* Maximum number of Tx descriptor registers */
 #define MAX_NUM_RX_DESC 1024    /* Maximum number of Rx descriptor registers */
 
 #define MIN_NUM_TX_DESC 256    /* Minimum number of Tx descriptor registers */
@@ -2196,6 +2196,12 @@ struct rtl8126_tx_ring {
         u16 sw_tail_ptr_reg;
 
         u16 tdsar_reg; /* Transmit Descriptor Start Address */
+
+// WARNING: Unofficial Tweak1 by Josh Kasten
+// Start: ENABLE_TX_PAGE_REUSE
+        void** tx_kmem_buffers;
+        dma_addr_t* tx_dma_buffers;
+// End: ENABLE_TX_PAGE_REUSE
 };
 
 struct rtl8126_rx_buffer {
@@ -2519,6 +2525,7 @@ struct rtl8126_private {
         unsigned rx_buf_page_size;
         u32 page_reuse_fail_cnt;
 #endif //ENABLE_PAGE_REUSE
+
         u16 HwSuppNumTxQueues;
         u16 HwSuppNumRxQueues;
         unsigned int num_tx_rings;
