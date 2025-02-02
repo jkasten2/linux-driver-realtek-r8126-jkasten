@@ -16505,7 +16505,6 @@ rtl8126_xmit_frags(struct rtl8126_private *tp,
                 ring->tx_skb[entry].len = len;
 
                 txd->opts2 = cpu_to_le32(opts[1]);
-                wmb(); // Perf: Kasten: Probably don't need to this, as we can flush when we write the header after this function is callled
                 txd->opts1 = cpu_to_le32(status);
 
                 PktLenCnt += len;
