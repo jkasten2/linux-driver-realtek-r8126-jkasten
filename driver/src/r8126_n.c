@@ -16137,8 +16137,8 @@ static void rtl8126_cancel_schedule_reset_work(struct rtl8126_private *tp)
 
 static void rtl8126_schedule_esd_work(struct rtl8126_private *tp)
 {
-        set_bit(R8126_FLAG_TASK_ESD_CHECK_PENDING, tp->task_flags);
-        schedule_delayed_work(&tp->esd_task, RTL8126_ESD_TIMEOUT);
+        // set_bit(R8126_FLAG_TASK_ESD_CHECK_PENDING, tp->task_flags);
+        // schedule_delayed_work(&tp->esd_task, RTL8126_ESD_TIMEOUT);
 }
 
 static void rtl8126_cancel_schedule_esd_work(struct rtl8126_private *tp)
@@ -16176,7 +16176,7 @@ static void rtl8126_init_all_schedule_work(struct rtl8126_private *tp)
         INIT_WORK(&tp->linkchg_task, rtl8126_linkchg_task, dev);
 #else
         INIT_DELAYED_WORK(&tp->reset_task, rtl8126_reset_task);
-        INIT_DELAYED_WORK(&tp->esd_task, rtl8126_esd_task);
+        // INIT_DELAYED_WORK(&tp->esd_task, rtl8126_esd_task);
         INIT_DELAYED_WORK(&tp->linkchg_task, rtl8126_linkchg_task);
 #endif
 }
