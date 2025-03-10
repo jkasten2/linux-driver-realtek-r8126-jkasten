@@ -2196,6 +2196,8 @@ struct rtl8126_tx_ring {
         u16 sw_tail_ptr_reg;
 
         u16 tdsar_reg; /* Transmit Descriptor Start Address */
+
+        struct page_pool *page_pool;
 };
 
 struct rtl8126_rx_buffer {

@@ -56,6 +56,7 @@
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
 #include <linux/completion.h>
+#include <net/page_pool/helpers.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)
@@ -4663,6 +4664,42 @@ static void rtl8126_disable_double_vlan(struct rtl8126_private *tp)
                 break;
         }
 }
+
+
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp); 
+
+static int rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
+        for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
+                /* Page pool registration */
+                struct page_pool_params pp_params = { 0 };
+                // int err;
+
+                pp_params.order = 0;
+                /* internal DMA mapping in page_pool */
+                pp_params.flags = PP_FLAG_DMA_MAP;
+                pp_params.pool_size = tp->tx_ring[ring_num].num_tx_desc;
+                pp_params.nid = NUMA_NO_NODE;
+                pp_params.dev = &tp->dev->dev;
+                // pp_params.napi = napi; /* only if locking is tied to NAPI */
+                pp_params.dma_dir = DMA_TO_DEVICE;
+                tp->tx_ring[ring_num].page_pool = page_pool_create(&pp_params);
+        }
+
+        // TODO: handle errors and call rt8126_dma_for_tx_buff_unsetup if needed
+
+        return 1;
+}
+
+static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
+        for(int ring_num = 0; ring_num < tp->num_tx_rings; ring_num++) {
+                // TODO: Store a list of pages so we can free them when we have to
+                // page_pool_put_full_page(tp->tx_ring[ring_num], page, false);
+
+                page_pool_destroy(tp->tx_ring[ring_num].page_pool);
+        }
+}
+
 
 static void
 rtl8126_link_on_patch(struct net_device *dev)
@@ -14984,6 +15021,8 @@ static void rtl8126_free_alloc_resources(struct rtl8126_private *tp)
         rtl8126_free_rx_desc(tp);
 
         rtl8126_free_tx_desc(tp);
+
+        rt8126_dma_for_tx_buff_unsetup(tp);
 }
 
 #ifdef ENABLE_USE_FIRMWARE_FILE
@@ -15034,6 +15073,10 @@ int rtl8126_open(struct net_device *dev)
         retval = rtl8126_init_ring(dev);
         if (retval < 0)
                 goto err_free_all_allocated_mem;
+
+        retval = rt8126_dma_for_tx_buff_setup(tp);
+        if (retval < 0)
+                 goto err_free_all_allocated_mem;
 
         retval = rtl8126_alloc_irq(tp);
         if (retval < 0)
