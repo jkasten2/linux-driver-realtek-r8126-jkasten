@@ -4682,7 +4682,9 @@ static int rt8126_dma_for_tx_buff_setup(struct rtl8126_private *tp) {
                 pp_params.nid = NUMA_NO_NODE;
                 pp_params.dev = &tp->dev->dev;
                 // pp_params.napi = napi; /* only if locking is tied to NAPI */
-                pp_params.dma_dir = DMA_TO_DEVICE;
+                // NOTE: We only need DMA_TO_DEVICE for tx, but this is not supported
+                // by the Page Poll API. It seems it was really designed for XDP.
+                pp_params.dma_dir = DMA_BIDIRECTIONAL;
                 tp->tx_ring[ring_num].page_pool = page_pool_create(&pp_params);
         }
 
@@ -4696,7 +4698,9 @@ static void rt8126_dma_for_tx_buff_unsetup(struct rtl8126_private *tp) {
                 // TODO: Store a list of pages so we can free them when we have to
                 // page_pool_put_full_page(tp->tx_ring[ring_num], page, false);
 
-                page_pool_destroy(tp->tx_ring[ring_num].page_pool);
+                if (tp->tx_ring[ring_num].page_pool != NULL) {
+                        page_pool_destroy(tp->tx_ring[ring_num].page_pool);
+                }
         }
 }
 
